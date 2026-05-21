@@ -48,6 +48,7 @@ from qgis.core import (
     QgsWkbTypes,
     QgsProject,
 )
+from qgis.PyQt.QtCore import QMetaType
 import math
 
 
@@ -211,8 +212,7 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
             'azimut e convergenza. Solo in modalita\' griglia completa. '
             'Sono inclusi anche i nodi sul bordo del clip (intersects).\n'
             '\u2022 Punti di riferimento P1 e P2 (opzionale): documenta '
-            'la griglia per archiviazione o ripristino futuro. Include '
-            'azimut_grid_deg e convergenza_deg numerici per ricostruzione.\n'
+            'la griglia per archiviazione o ripristino futuro.\n'
             '\u2022 Asse della griglia (linea, opzionale): segmento P1\u2013P2 '
             'come singola feature, utile per visualizzazione e snap.\n\n'
 
@@ -671,19 +671,19 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         # Campi output — LINEE
         # =============================================
         line_fields = QgsFields()
-        line_fields.append(QgsField('id', int))
-        line_fields.append(QgsField('tipo', str))
-        line_fields.append(QgsField('indice', int))
-        line_fields.append(QgsField('etichetta', str))  # B) label leggibile
-        line_fields.append(QgsField('dist_asse', float))  # distanza dall'asse
-        line_fields.append(QgsField('coord_u', float))    # coord. locale u
-        line_fields.append(QgsField('coord_v', float))    # coord. locale v
-        line_fields.append(QgsField('azimut_griglia', str))
-        line_fields.append(QgsField('azimut_geo', str))
-        line_fields.append(QgsField('convergenza', str))
+        line_fields.append(QgsField('id', QMetaType.Type.Int))
+        line_fields.append(QgsField('tipo', QMetaType.Type.QString))
+        line_fields.append(QgsField('indice', QMetaType.Type.Int))
+        line_fields.append(QgsField('etichetta', QMetaType.Type.QString))  # B) label leggibile
+        line_fields.append(QgsField('dist_asse', QMetaType.Type.Double))  # distanza dall'asse
+        line_fields.append(QgsField('coord_u', QMetaType.Type.Double))    # coord. locale u
+        line_fields.append(QgsField('coord_v', QMetaType.Type.Double))    # coord. locale v
+        line_fields.append(QgsField('azimut_griglia', QMetaType.Type.QString))
+        line_fields.append(QgsField('azimut_geo', QMetaType.Type.QString))
+        line_fields.append(QgsField('convergenza', QMetaType.Type.QString))
         if use_scale:
-            line_fields.append(QgsField('dist_suolo', float))
-            line_fields.append(QgsField('fattore_scala', float))
+            line_fields.append(QgsField('dist_suolo', QMetaType.Type.Double))
+            line_fields.append(QgsField('fattore_scala', QMetaType.Type.Double))
 
         (sink_lines, dest_lines) = self.parameterAsSink(
             parameters, self.OUTPUT_LINES, context,
@@ -694,13 +694,13 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         # Campi output — PUNTI (opzionale, punto 4)
         # =============================================
         point_fields = QgsFields()
-        point_fields.append(QgsField('id', int))
-        point_fields.append(QgsField('coord_u', float))
-        point_fields.append(QgsField('coord_v', float))
-        point_fields.append(QgsField('etichetta', str))
-        point_fields.append(QgsField('azimut_griglia', str))
-        point_fields.append(QgsField('azimut_geo', str))
-        point_fields.append(QgsField('convergenza', str))
+        point_fields.append(QgsField('id', QMetaType.Type.Int))
+        point_fields.append(QgsField('coord_u', QMetaType.Type.Double))
+        point_fields.append(QgsField('coord_v', QMetaType.Type.Double))
+        point_fields.append(QgsField('etichetta', QMetaType.Type.QString))
+        point_fields.append(QgsField('azimut_griglia', QMetaType.Type.QString))
+        point_fields.append(QgsField('azimut_geo', QMetaType.Type.QString))
+        point_fields.append(QgsField('convergenza', QMetaType.Type.QString))
 
         sink_points = None
         dest_points = None
@@ -715,18 +715,16 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         # F) Campi output — PUNTI DI RIFERIMENTO P1/P2
         # =============================================
         ref_fields = QgsFields()
-        ref_fields.append(QgsField('nome', str))
-        ref_fields.append(QgsField('x', float))
-        ref_fields.append(QgsField('y', float))
-        ref_fields.append(QgsField('distanza_P1_P2', float))
-        ref_fields.append(QgsField('azimut_griglia', str))
-        ref_fields.append(QgsField('azimut_geo', str))
-        ref_fields.append(QgsField('azimut_grid_deg', float))  # numerico per ricostruzione
-        ref_fields.append(QgsField('convergenza', str))
-        ref_fields.append(QgsField('convergenza_deg', float))  # numerico
-        ref_fields.append(QgsField('sp_par_m', float))
-        ref_fields.append(QgsField('sp_perp_m', float))
-        ref_fields.append(QgsField('origine_direzione', str))
+        ref_fields.append(QgsField('nome', QMetaType.Type.QString))
+        ref_fields.append(QgsField('x', QMetaType.Type.Double))
+        ref_fields.append(QgsField('y', QMetaType.Type.Double))
+        ref_fields.append(QgsField('distanza_P1_P2', QMetaType.Type.Double))
+        ref_fields.append(QgsField('azimut_griglia', QMetaType.Type.QString))
+        ref_fields.append(QgsField('azimut_geo', QMetaType.Type.QString))
+        ref_fields.append(QgsField('convergenza', QMetaType.Type.QString))
+        ref_fields.append(QgsField('sp_par_m', QMetaType.Type.Double))
+        ref_fields.append(QgsField('sp_perp_m', QMetaType.Type.Double))
+        ref_fields.append(QgsField('origine_direzione', QMetaType.Type.QString))
 
         sink_ref = None
         dest_ref = None
@@ -1003,9 +1001,7 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
                     dist_p1p2,
                     format_azimuth(azimuth_grid_par),
                     format_azimuth(azimuth_geo_par),
-                    azimuth_grid_par,  # numerico per ricostruzione
                     format_convergence(convergence),
-                    convergence,       # numerico
                     sp_par,
                     sp_perp,
                     origine,
@@ -1019,12 +1015,11 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         # =============================================
         if parameters.get(self.OUTPUT_AXIS) not in (None, ''):
             axis_fields = QgsFields()
-            axis_fields.append(QgsField('nome', str))
-            axis_fields.append(QgsField('lunghezza_m', float))
-            axis_fields.append(QgsField('azimut_griglia', str))
-            axis_fields.append(QgsField('azimut_geo', str))
-            axis_fields.append(QgsField('azimut_grid_deg', float))
-            axis_fields.append(QgsField('convergenza', str))
+            axis_fields.append(QgsField('nome', QMetaType.Type.QString))
+            axis_fields.append(QgsField('lunghezza_m', QMetaType.Type.Double))
+            axis_fields.append(QgsField('azimut_griglia', QMetaType.Type.QString))
+            axis_fields.append(QgsField('azimut_geo', QMetaType.Type.QString))
+            axis_fields.append(QgsField('convergenza', QMetaType.Type.QString))
             (sink_axis, dest_axis) = self.parameterAsSink(
                 parameters, self.OUTPUT_AXIS, context,
                 axis_fields, QgsWkbTypes.LineString, crs,
@@ -1036,7 +1031,6 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
                 math.hypot(pt2.x()-pt1.x(), pt2.y()-pt1.y()),
                 format_azimuth(azimuth_grid_par),
                 format_azimuth(azimuth_geo_par),
-                azimuth_grid_par,
                 format_convergence(convergence),
             ])
             sink_axis.addFeature(f, QgsFeatureSink.FastInsert)
