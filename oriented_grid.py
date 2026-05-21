@@ -136,9 +136,9 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
             'l\'asse (m, nel sistema cartografico)\n'
             '\u2022 coord_u, coord_v: coordinate nel sistema locale\n'
             '\u2022 azimut_griglia: azimut della linea rispetto al nord '
-            'griglia (es. 33.62301\u00b0E), in [0\u00b0, 90\u00b0] \u00b1 E/W\n'
+            'griglia (es. 33.62301\u00b0E), sempre in [0\u00b0, 180\u00b0)\n'
             '\u2022 azimut_geo: azimut della linea rispetto al nord '
-            'geografico (es. 33.12450\u00b0E)\n'
+            'geografico (es. 33.12450\u00b0E), sempre in [0\u00b0, 180\u00b0)\n'
             '\u2022 convergenza: convergenza dei meridiani in P1 '
             '(es. 0.49851\u00b0W)\n'
             'Se attivo il fattore di scala, vengono aggiunti i campi '
@@ -162,12 +162,14 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
             'indipendenti dal verso della linea: invertendo P1 e P2 '
             'l\'azimut resta invariato.\n'
             'Notazione:\n'
-            '\u2022 XX.XXXXX\u00b0E = linea inclinata X gradi a est del N-S\n'
-            '\u2022 XX.XXXXX\u00b0W = linea inclinata X gradi a ovest del N-S\n'
-            '\u2022 Valori sempre in [0\u00b0, 90\u00b0]; 0\u00b0E = linea N-S, '
-            '90\u00b0E = linea E-W\n'
+            '\u2022 XX.XXXXX\u00b0E = inclinazione dal Nord in senso orario\n'
+            '\u2022 Range [0\u00b0, 180\u00b0). Esempi: 0\u00b0E = linea N-S, '
+            '45\u00b0E = linea NE-SW, 90\u00b0E = linea E-W, '
+            '135\u00b0E = linea NW-SE\n'
             'La convergenza segue la convenzione topografica standard '
-            '\u03b3 = grid_north \u2212 true_north (positiva in senso orario):\n'
+            '\u03b3 = grid_north \u2212 true_north (positiva in senso orario), '
+            'e mantiene il suffisso E/W perche\' e\' una grandezza '
+            'direzionale, non un orientamento di linea:\n'
             '\u2022 X.XXXXX\u00b0E = grid nord a est di true nord '
             '(P1 a est del meridiano centrale UTM)\n'
             '\u2022 X.XXXXX\u00b0W = grid nord a ovest di true nord '
@@ -610,19 +612,15 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         azimuth_geo_perp = (azimuth_grid_perp + convergence) % 180.0
 
         def format_azimuth(deg):
-            """Formatta un azimut di linea (range [0, 180)) come N+-E/W.
+            """Formatta un azimut di linea (range [0, 180)) come gradi a est
+            del Nord in senso orario, sempre con suffisso E.
 
-            L'azimut e' misurato dal Nord in senso orario verso Est,
-            normalizzato modulo 180 per essere indipendente dal verso
-            della linea. Convenzione: linea tilted X gradi a est del
-            N-S = X.XXXXX gradi E; tilted X gradi a ovest del N-S =
-            X.XXXXX gradi W.
+            L'azimut e' misurato dal Nord in senso orario, normalizzato
+            modulo 180 per essere indipendente dal verso della linea.
+            Una linea N-S = 0\u00b0E, N-E = 45\u00b0E, E-W = 90\u00b0E,
+            N-W (geometricamente uguale a S-E) = 135\u00b0E.
             """
-            deg = deg % 180.0
-            if deg <= 90.0:
-                return f'{deg:.5f}\u00b0E'
-            else:
-                return f'{180.0 - deg:.5f}\u00b0W'
+            return f'{deg % 180.0:.5f}\u00b0E'
 
         def format_convergence(deg):
             """Formatta la convergenza dei meridiani: positiva=E, negativa=W."""
