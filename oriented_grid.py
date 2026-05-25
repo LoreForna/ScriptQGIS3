@@ -58,6 +58,7 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
     POINT2 = 'POINT2'
     USE_AZIMUTH = 'USE_AZIMUTH'
     AZIMUTH_INPUT = 'AZIMUTH_INPUT'
+    AZIMUTH_REF = 'AZIMUTH_REF'
     SPACING_PAR = 'SPACING_PAR'
     SPACING_PERP = 'SPACING_PERP'
     GRID_TYPE = 'GRID_TYPE'
@@ -75,6 +76,11 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         'Solo parallele (all\'asse P1-P2)',
         'Solo perpendicolari (all\'asse P1-P2)',
         'Griglia completa (parallele + perpendicolari)',
+    ]
+
+    AZIMUTH_REF_OPTIONS = [
+        'Nord geografico (true north)',
+        'Nord griglia (grid north)',
     ]
 
     def name(self):
@@ -103,8 +109,14 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
             '\u2022 Usa azimut diretto: se attivo, P2 viene ignorato e la '
             'direzione e\' presa dall\'azimut numerico (es. da un rilievo '
             'precedente o da una pubblicazione)\n'
-            '\u2022 Azimut dell\'asse: valore in gradi rispetto al Nord '
-            'griglia (0\u2013360, senso orario)\n'
+            '\u2022 Azimut dell\'asse: valore in gradi (0\u2013360, senso '
+            'orario)\n'
+            '\u2022 Riferimento dell\'azimut: Nord geografico (true north, '
+            'default) o Nord griglia (grid north). Se si inserisce un '
+            'angolo misurato con lo strumento di QGIS "Sketcher sketcher" o con uno '
+            'strumento topografico riferito al nord vero, usare il '
+            'default; lo script applica automaticamente la convergenza '
+            'dei meridiani per passare al nord griglia\n'
             '\u2022 Spaziatura parallele/perpendicolari in metri\n'
             '\u2022 Estensione rettangolare: area di copertura (opzionale '
             'se si fornisce un poligono di clip; altrimenti obbligatoria)\n'
@@ -263,13 +275,18 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         ))
         self.addParameter(QgsProcessingParameterNumber(
             self.AZIMUTH_INPUT,
-            'Azimut dell\'asse rispetto al Nord griglia (gradi, '
-            '0\u2013360, senso orario)',
+            'Azimut dell\'asse (gradi, 0\u2013360, senso orario)',
             type=QgsProcessingParameterNumber.Double,
             defaultValue=0.0,
             minValue=0.0,
             maxValue=360.0,
             optional=True,
+        ))
+        self.addParameter(QgsProcessingParameterEnum(
+            self.AZIMUTH_REF,
+            'Riferimento dell\'azimut',
+            options=self.AZIMUTH_REF_OPTIONS,
+            defaultValue=0,
         ))
 
         # --- Tipo di griglia e spaziature ---
@@ -378,26 +395,66 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         # =============================================
         # 2) Coerenza CRS: riproiezione punti, extent, poligono
         # =============================================
-        project_crs = QgsProject.instance().crs()
-
-        # Trasformazione progetto -> output, definita una sola volta per
-        # evitare dipendenze sull'ordine di esecuzione
-        if project_crs != crs:
-            xform_pts = QgsCoordinateTransform(
-                project_crs, crs, QgsProject.instance()
-            )
-        else:
-            xform_pts = None
-
-        def to_output_crs(point_xy):
-            """Trasforma un QgsPointXY dal CRS progetto al CRS output."""
-            if xform_pts is None:
-                return QgsPointXY(point_xy)
-            return xform_pts.transform(QgsPointXY(point_xy))
-
         # --- Punto 1 (sempre richiesto) ---
-        pt1_raw = self.parameterAsPoint(parameters, self.POINT1, context)
-        pt1 = to_output_crs(pt1_raw)
+        # Passare il CRS di output direttamente a parameterAsPoint: QGIS
+        # gestisce internamente la riproiezione dal CRS nativo del parametro
+        # (determinato dal widget/mappa) al CRS richiesto, senza assumere
+        # che coincida con il CRS del progetto.
+        pt1 = self.parameterAsPoint(parameters, self.POINT1, context, crs)
+
+        # =============================================
+        # Convergenza dei meridiani (calcolata subito dopo P1 perche'
+        # serve anche per convertire un eventuale azimut geografico
+        # in azimut griglia prima di costruire P2)
+        # =============================================
+        # gamma = grid_north - true_north (misurato in senso orario)
+        # gamma > 0 quando grid nord e' a est di true nord
+        # (P1 a est del meridiano centrale UTM).
+        #
+        # Metodo numerico (riproiezione di un piccolo spostamento in
+        # latitudine), funziona con qualsiasi CRS proiettato.
+        crs_geo = QgsCoordinateReferenceSystem('EPSG:4326')
+        xform_to_geo = QgsCoordinateTransform(crs, crs_geo, QgsProject.instance())
+        xform_from_geo = QgsCoordinateTransform(crs_geo, crs, QgsProject.instance())
+
+        pt1_geo = xform_to_geo.transform(pt1)
+        delta_lat = 0.001  # ~111 m
+        pt1_north_geo = QgsPointXY(pt1_geo.x(), pt1_geo.y() + delta_lat)
+
+        pt1_proj = QgsPointXY(pt1.x(), pt1.y())
+        pt1_north_proj = xform_from_geo.transform(pt1_north_geo)
+
+        dn_x = pt1_north_proj.x() - pt1_proj.x()
+        dn_y = pt1_north_proj.y() - pt1_proj.y()
+        convergence = -math.degrees(math.atan2(dn_x, dn_y))
+
+        # Formula analitica UTM (piu' precisa, se disponibile)
+        crs_desc = crs.description() or ''
+        is_utm = 'utm' in crs_desc.lower()
+        if is_utm:
+            try:
+                proj_str = crs.toProj()
+                lon0 = None
+                if '+lon_0=' in proj_str:
+                    lon0 = float(
+                        proj_str.split('+lon_0=')[1].split()[0]
+                    )
+                if lon0 is not None:
+                    phi = math.radians(pt1_geo.y())
+                    dlon = math.radians(pt1_geo.x() - lon0)
+                    gamma_analytic = math.degrees(
+                        math.atan(math.tan(dlon) * math.sin(phi))
+                    )
+                    feedback.pushInfo(
+                        f'Convergenza analitica UTM (rif.): {gamma_analytic:+.5f}\u00b0 '
+                        f'(MC {lon0}\u00b0, lat {math.degrees(phi):.4f}\u00b0)'
+                    )
+                    convergence = gamma_analytic
+            except Exception as e:
+                feedback.pushInfo(
+                    f'Calcolo convergenza analitica fallito ({e}), '
+                    f'uso il metodo numerico.'
+                )
 
         # --- Determinazione della direzione: da P2 oppure da azimut ---
         use_azimuth = self.parameterAsBool(
@@ -405,19 +462,35 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         )
 
         if use_azimuth:
-            # Direzione da azimut diretto (gradi da Nord griglia, orario)
             az_input = self.parameterAsDouble(
                 parameters, self.AZIMUTH_INPUT, context
             )
-            az_rad = math.radians(az_input)
+            az_ref = self.parameterAsEnum(
+                parameters, self.AZIMUTH_REF, context
+            )
+            # az_ref == 0 -> Nord geografico (default)
+            # az_ref == 1 -> Nord griglia
+            if az_ref == 0:
+                # Conversione: az_griglia = az_geo - convergenza
+                az_grid = az_input - convergence
+                feedback.pushInfo(
+                    f'Azimut inserito riferito al Nord geografico: '
+                    f'{az_input:.4f}\u00b0\n'
+                    f'Convergenza in P1: {convergence:+.5f}\u00b0\n'
+                    f'Azimut griglia risultante: {az_grid:.4f}\u00b0'
+                )
+            else:
+                az_grid = az_input
+                feedback.pushInfo(
+                    f'Azimut inserito riferito al Nord griglia: '
+                    f'{az_input:.4f}\u00b0'
+                )
+            az_rad = math.radians(az_grid)
             # In coordinate proiettate (E, N): dE = sin(az), dN = cos(az)
             # P2 fittizio a 1 m di distanza in quella direzione
             pt2 = QgsPointXY(
                 pt1.x() + math.sin(az_rad),
                 pt1.y() + math.cos(az_rad),
-            )
-            feedback.pushInfo(
-                f'Direzione asse definita da azimut griglia: {az_input:.4f}\u00b0'
             )
         else:
             # Direzione da Punto 2
@@ -429,8 +502,7 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
                     'diretto. Indicare il Punto 2 sulla mappa oppure '
                     'attivare l\'opzione "Usa azimut diretto".'
                 )
-            pt2_raw = self.parameterAsPoint(parameters, self.POINT2, context)
-            pt2 = to_output_crs(pt2_raw)
+            pt2 = self.parameterAsPoint(parameters, self.POINT2, context, crs)
 
         # --- Estensione rettangolare (opzionale) e suo CRS ---
         extent_provided = parameters.get(self.EXTENT) not in (None, '')
@@ -541,7 +613,7 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         vx, vy = -uy, ux
 
         # =============================================
-        # 5) Azimut griglia e convergenza dei meridiani
+        # 5) Azimut griglia delle linee (dal vettore P1->P2)
         # =============================================
         # Azimut rispetto al nord griglia, normalizzato a [0, 180) per
         # essere indipendente dall'ordine dei punti P1/P2 (invertendo
@@ -550,63 +622,7 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         azimuth_grid_par = math.degrees(math.atan2(dx, dy)) % 180.0
         azimuth_grid_perp = (azimuth_grid_par + 90.0) % 180.0
 
-        # Convergenza dei meridiani (gamma): convenzione topografica
-        #   gamma = grid_north - true_north (misurato in senso orario)
-        # Equivalentemente: gamma > 0 quando grid nord e' a est di true nord
-        # (P1 a est del meridiano centrale UTM).
-        #
-        # Metodo: per il calcolo si usa il metodo numerico (riproiezione di un
-        # piccolo spostamento in latitudine) che funziona con qualsiasi CRS
-        # proiettato. Per CRS UTM viene anche calcolata la formula analitica
-        # gamma = atan(tan(dlon) * sin(phi)) come riferimento e log.
-        crs_geo = QgsCoordinateReferenceSystem('EPSG:4326')
-        xform_to_geo = QgsCoordinateTransform(crs, crs_geo, QgsProject.instance())
-        xform_from_geo = QgsCoordinateTransform(crs_geo, crs, QgsProject.instance())
-
-        pt1_geo = xform_to_geo.transform(pt1)
-        delta_lat = 0.001  # ~111 m
-        pt1_north_geo = QgsPointXY(pt1_geo.x(), pt1_geo.y() + delta_lat)
-
-        pt1_proj = QgsPointXY(pt1.x(), pt1.y())
-        pt1_north_proj = xform_from_geo.transform(pt1_north_geo)
-
-        # atan2(dn_x, dn_y) = azimut di true_north misurato da grid_north
-        # = -(grid_north - true_north) = -gamma. Quindi gamma = -atan2.
-        dn_x = pt1_north_proj.x() - pt1_proj.x()
-        dn_y = pt1_north_proj.y() - pt1_proj.y()
-        convergence = -math.degrees(math.atan2(dn_x, dn_y))
-
-        # Formula analitica UTM (solo per log/verifica): se il CRS e' UTM
-        # noto, calcola gamma_analitica = atan(tan(lon-lon0) * sin(phi))
-        crs_desc = crs.description() or ''
-        is_utm = 'utm' in crs_desc.lower()
-        if is_utm:
-            try:
-                # Estrae il meridiano centrale dalla proj string
-                proj_str = crs.toProj()
-                lon0 = None
-                if '+lon_0=' in proj_str:
-                    lon0 = float(
-                        proj_str.split('+lon_0=')[1].split()[0]
-                    )
-                if lon0 is not None:
-                    phi = math.radians(pt1_geo.y())
-                    dlon = math.radians(pt1_geo.x() - lon0)
-                    gamma_analytic = math.degrees(
-                        math.atan(math.tan(dlon) * math.sin(phi))
-                    )
-                    feedback.pushInfo(
-                        f'Convergenza analitica UTM (rif.): {gamma_analytic:+.5f}\u00b0 '
-                        f'(MC {lon0}\u00b0, lat {math.degrees(phi):.4f}\u00b0)'
-                    )
-                    # Sostituisce con il valore analitico, piu' preciso
-                    convergence = gamma_analytic
-            except Exception as e:
-                feedback.pushInfo(
-                    f'Calcolo convergenza analitica fallito ({e}), '
-                    f'uso il metodo numerico.'
-                )
-
+        # La convergenza e' gia' stata calcolata prima del ramo azimut.
         # Formula standard: azimut_geo = azimut_griglia + convergenza
         azimuth_geo_par = (azimuth_grid_par + convergence) % 180.0
         azimuth_geo_perp = (azimuth_grid_perp + convergence) % 180.0
@@ -984,7 +1000,11 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         # =============================================
         if sink_ref is not None:
             origine = (
-                'Azimut diretto (P2 fittizio)' if use_azimuth
+                'Azimut diretto, rif. Nord geografico (P2 fittizio)'
+                if use_azimuth and self.parameterAsEnum(
+                    parameters, self.AZIMUTH_REF, context) == 0
+                else 'Azimut diretto, rif. Nord griglia (P2 fittizio)'
+                if use_azimuth
                 else 'Punto 2 indicato sulla mappa'
             )
             dist_p1p2 = math.hypot(pt2.x() - pt1.x(), pt2.y() - pt1.y())
