@@ -1,15 +1,14 @@
 """
-CSV / Points to Grouped Polygons (Convex or Concave Hull)
+CSV / Grouped Points to Polygons
 =========================================================
 
 QGIS Processing script that converts a point layer (or a non-spatial table
 with X/Y coordinate columns) into polygons by grouping features on a common
-attribute field and computing either convex hull or concave hull
-(requires QGIS >= 3.28 / GEOS >= 3.11) for each group.
+attribute field and computing either convex hull or concave hull.
 
 Parameters
 ----------
-- INPUT           : Input layer (point layer or table with X/Y columns)
+- INPUT           : Input layer (point layer or CSV encoded in UTF-8 with X/Y columns)
 - X_FIELD         : Field containing X / Easting coordinate (optional if
                     input already has point geometry)
 - Y_FIELD         : Field containing Y / Northing coordinate (optional if
@@ -91,7 +90,7 @@ class PointsToGroupedPolygons(QgsProcessingAlgorithm):
         return "points_to_grouped_polygons"
 
     def displayName(self):
-        return self.tr("Points to Grouped Polygons (Hull)")
+        return self.tr("Grouped Points to Polygons")
 
     def group(self):
         return self.tr("Vector geometry")
@@ -104,12 +103,11 @@ class PointsToGroupedPolygons(QgsProcessingAlgorithm):
             "Raggruppa i punti per un campo attributo e crea un poligono "
             "(convex hull o concave hull) per ciascun gruppo.\n\n"
             "Il layer in ingresso puo' essere un layer di punti (geometria gia' "
-            "definita) oppure una tabella non spaziale con colonne X/Y.\n\n"
+            "definita) oppure un CSV codificato in UTF-8 con colonne X/Y.\n\n"
             "Se si specificano i campi X e Y, le coordinate vengono lette da "
             "quegli attributi; altrimenti si usa la geometria esistente.\n\n"
             "Produce due output: il layer dei poligoni e il layer dei punti "
             "(eventualmente riproiettati).\n\n"
-            "Il concave hull richiede QGIS >= 3.28 (GEOS >= 3.11).\n"
             "Rapporto concavita': 0 = molto concavo, 1 = equivalente al convex hull."
         )
 
