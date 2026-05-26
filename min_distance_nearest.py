@@ -84,7 +84,7 @@ class MinDistanceToNearest(QgsProcessingAlgorithm):
         return self.tr("Distanza minima al feature piu' vicino")
 
     def group(self):
-        return self.tr("Vector analysis")
+        return self.tr("Distanza minima")
 
     def groupId(self):
         return "vectoranalysis"

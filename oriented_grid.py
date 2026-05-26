@@ -87,7 +87,7 @@ class OrientedGridAlgorithm(QgsProcessingAlgorithm):
         return 'oriented_grid'
 
     def displayName(self):
-        return 'Griglia orientata da due punti'
+        return 'Griglia orientata'
 
     def group(self):
         return 'Griglie e reticoli'
