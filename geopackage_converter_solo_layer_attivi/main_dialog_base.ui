@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>GeoPackageConverterDialogBase</class>
+ <widget class="QDialog" name="GeoPackageConverterDialogBase">
+  <property name="windowTitle"><string>GeoPackage Converter</string></property>
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>820</width><height>640</height></rect>
+  </property>
+  <layout class="QVBoxLayout" name="rootLayout">
+
+   <!-- Tabs: From project / From folder -->
+   <item>
+    <widget class="QTabWidget" name="tabWidget">
+     <property name="currentIndex"><number>0</number></property>
+
+     <!-- ============== TAB 1: From project ============== -->
+     <widget class="QWidget" name="tabFromProject">
+      <attribute name="title"><string>Da progetto</string></attribute>
+      <layout class="QVBoxLayout">
+       <item>
+        <widget class="QLabel" name="lblProjectHelp">
+         <property name="text"><string>Seleziona i layer vettoriali e raster del progetto da convertire in GeoPackage.</string></property>
+         <property name="wordWrap"><bool>true</bool></property>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout">
+         <item><widget class="QPushButton" name="btnSelectAll"><property name="text"><string>Seleziona tutto</string></property></widget></item>
+         <item><widget class="QPushButton" name="btnSelectNone"><property name="text"><string>Deseleziona tutto</string></property></widget></item>
+         <item><widget class="QPushButton" name="btnSelectVisible"><property name="text"><string>Solo layer attivi</string></property></widget></item>
+         <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QListWidget" name="lstProjectLayers">
+         <property name="selectionMode"><enum>QAbstractItemView::ExtendedSelection</enum></property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+
+     <!-- ============== TAB 2: From folder ============== -->
+     <widget class="QWidget" name="tabFromFolder">
+      <attribute name="title"><string>Da cartella</string></attribute>
+      <layout class="QVBoxLayout">
+       <item>
+        <layout class="QHBoxLayout">
+         <item><widget class="QLabel" name="lblFolder"><property name="text"><string>Cartella di input:</string></property></widget></item>
+         <item><widget class="QLineEdit" name="edtFolder"/></item>
+         <item><widget class="QPushButton" name="btnBrowseFolder"><property name="text"><string>Sfoglia…</string></property></widget></item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout">
+         <item><widget class="QCheckBox" name="chkMirrorStructure"><property name="text"><string>Replica struttura su disco</string></property></widget></item>
+         <item><widget class="QPushButton" name="btnScan"><property name="text"><string>Scansiona cartella</string></property></widget></item>
+         <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QTableWidget" name="tblFolderPreview">
+         <property name="columnCount"><number>7</number></property>
+         <column><property name="text"><string>Nome</string></property></column>
+         <column><property name="text"><string>Formato</string></property></column>
+         <column><property name="text"><string>Tipo</string></property></column>
+         <column><property name="text"><string>CRS</string></property></column>
+         <column><property name="text"><string>Dettagli</string></property></column>
+         <column><property name="text"><string>Encoding</string></property></column>
+         <column><property name="text"><string>Avvisi</string></property></column>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+
+    </widget>
+   </item>
+
+   <!-- =================== Common options =================== -->
+   <item>
+    <widget class="QGroupBox" name="grpOptions">
+     <property name="title"><string>Opzioni di conversione</string></property>
+     <layout class="QFormLayout">
+      <item row="0" column="0"><widget class="QLabel" name="lblTargetCrs"><property name="text"><string>CRS di destinazione:</string></property></widget></item>
+      <item row="0" column="1"><widget class="QgsProjectionSelectionWidget" name="crsSelector"/></item>
+
+      <item row="1" column="0"><widget class="QLabel" name="lblGrouping"><property name="text"><string>Strategia di raggruppamento:</string></property></widget></item>
+      <item row="1" column="1"><widget class="QComboBox" name="cmbGrouping"/></item>
+
+      <item row="2" column="0"><widget class="QLabel" name="lblOutput"><property name="text"><string>GeoPackage di output:</string></property></widget></item>
+      <item row="2" column="1">
+       <layout class="QHBoxLayout">
+        <item><widget class="QLineEdit" name="edtOutput"/></item>
+        <item><widget class="QPushButton" name="btnBrowseOutput"><property name="text"><string>Sfoglia…</string></property></widget></item>
+       </layout>
+      </item>
+
+      <item row="3" column="1">
+       <layout class="QHBoxLayout">
+        <item><widget class="QCheckBox" name="chkSaveStyles"><property name="text"><string>Salva stili</string></property><property name="checked"><bool>true</bool></property></widget></item>
+        <item><widget class="QCheckBox" name="chkValidate"><property name="text"><string>Valida geometrie</string></property></widget></item>
+        <item><widget class="QCheckBox" name="chkDryRun"><property name="text"><string>Dry-run (anteprima)</string></property></widget></item>
+        <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+       </layout>
+      </item>
+
+      <item row="4" column="0"><widget class="QLabel" name="lblRasterOptions"><property name="text"><string>Opzioni raster:</string></property></widget></item>
+      <item row="4" column="1">
+       <layout class="QHBoxLayout">
+        <item><widget class="QLabel" name="lblTileFormat"><property name="text"><string>Formato tile:</string></property></widget></item>
+        <item>
+         <widget class="QComboBox" name="cmbTileFormat">
+          <item><property name="text"><string>AUTO</string></property></item>
+          <item><property name="text"><string>PNG</string></property></item>
+          <item><property name="text"><string>JPEG</string></property></item>
+          <item><property name="text"><string>WEBP</string></property></item>
+         </widget>
+        </item>
+        <item><widget class="QLabel" name="lblTileSize"><property name="text"><string>Tile:</string></property></widget></item>
+        <item>
+         <widget class="QComboBox" name="cmbTileSize">
+          <item><property name="text"><string>256</string></property></item>
+          <item><property name="text"><string>512</string></property></item>
+         </widget>
+        </item>
+        <item><widget class="QLabel" name="lblJpegQuality"><property name="text"><string>Qualità:</string></property></widget></item>
+        <item>
+         <widget class="QSpinBox" name="spnJpegQuality">
+          <property name="minimum"><number>1</number></property>
+          <property name="maximum"><number>100</number></property>
+          <property name="value"><number>75</number></property>
+         </widget>
+        </item>
+        <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+
+   <!-- =================== Progress + log =================== -->
+   <item><widget class="QProgressBar" name="prgConversion"><property name="value"><number>0</number></property></widget></item>
+   <item>
+    <widget class="QPlainTextEdit" name="txtLog">
+     <property name="readOnly"><bool>true</bool></property>
+     <property name="maximumBlockCount"><number>1000</number></property>
+    </widget>
+   </item>
+
+   <!-- =================== Bottom buttons =================== -->
+   <item>
+    <layout class="QHBoxLayout">
+     <item><widget class="QPushButton" name="btnOpenOutput"><property name="text"><string>Apri cartella</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item><widget class="QPushButton" name="btnOpenReport"><property name="text"><string>Apri report</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+     <item><widget class="QPushButton" name="btnRun"><property name="text"><string>Esegui</string></property><property name="default"><bool>true</bool></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item><widget class="QPushButton" name="btnCancel"><property name="text"><string>Annulla</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+     <item><widget class="QPushButton" name="btnClose"><property name="text"><string>Chiudi</string></property></widget></item>
+    </layout>
+   </item>
+
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>QgsProjectionSelectionWidget</class>
+   <extends>QWidget</extends>
+   <header>qgis.gui</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
