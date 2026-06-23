@@ -69,7 +69,7 @@ from qgis.core import (
 )
 
 
-class NormalMapFromDemAlgorithm(QgsProcessingAlgorithm):
+class NormalMapFromDem(QgsProcessingAlgorithm):
     INPUT = 'INPUT'
     BAND = 'BAND'
     HEIGHT_SCALE = 'HEIGHT_SCALE'
@@ -85,10 +85,10 @@ class NormalMapFromDemAlgorithm(QgsProcessingAlgorithm):
     FORMAT_BOTH = 2
 
     def tr(self, string):
-        return QCoreApplication.translate('NormalMapFromDemAlgorithm', string)
+        return QCoreApplication.translate('NormalMapFromDem', string)
 
     def createInstance(self):
-        return NormalMapFromDemAlgorithm()
+        return NormalMapFromDem()
 
     def name(self):
         return 'normal_map_from_dem'
