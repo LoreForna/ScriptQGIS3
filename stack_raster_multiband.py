@@ -38,7 +38,8 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
     """
     Conforma il DEM alla griglia dell'ortofoto (warp bilinear + -tap),
     impila ortofoto + DEM (+ normal map) in un VRT -separate e materializza
-    il GeoTIFF multibanda. Produce anche una variante a 3 bande (R, DEM, B).
+    il GeoTIFF multibanda. Produce anche una variante a 3 bande con bande
+    scelte liberamente dall'utente tra quelle disponibili nello stack.
     """
 
     ORTHO = "ORTHO"
@@ -46,8 +47,22 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
     NORMAL = "NORMAL"
     USE_NORMAL = "USE_NORMAL"
     DEM_RESAMPLING = "DEM_RESAMPLING"
-    MAKE_3BANDS = "MAKE_3BANDS"
+    MAKE_3BANDS = "MAKE_CUSTOM"
+    CUSTOM_BANDS = "CUSTOM_BANDS"
     OUT_DIR = "OUT_DIR"
+
+    # Etichette delle bande sorgente nello stack completo.
+    # Indice lista (0-based) -> numero banda GDAL (1-based) = indice + 1.
+    # Le ultime tre (NX,NY,NZ) esistono solo se USE_NORMAL = True (stack a 7 bande).
+    SRC_BAND_LABELS = [
+        "1 = R (ortofoto)",     # banda 1
+        "2 = G (ortofoto)",     # banda 2
+        "3 = B (ortofoto)",     # banda 3
+        "4 = DEM (quota)",      # banda 4
+        "5 = NX (normale)",     # banda 5  (solo con normal map)
+        "6 = NY (normale)",     # banda 6  (solo con normal map)
+        "7 = NZ (normale)",     # banda 7  (solo con normal map)
+    ]
 
     # enum allineato a gdal:warpreproject
     RESAMPLING_OPTIONS = [
@@ -89,7 +104,12 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
             "ATTENZIONE: la normal map NON va warpata (campo di versori). "
             "Attiva 'Includi normal map' solo se e' GIA' sulla griglia "
             "dell'ortofoto (rigenerata dal DEM allineato).\n\n"
-            "Output: stack_4b.tif (o stack_7b.tif) e, opzionale, stack_R_DEM_B.tif."
+            "Raster custom: seleziona quali bande dello stack includere "
+            "(da 1 a 7 bande). L'ordine di output segue la lista "
+            "(1=R,2=G,3=B,4=DEM,5=NX,6=NY,7=NZ). Le bande NX/NY/NZ sono "
+            "valide solo se la normal map e' inclusa.\n\n"
+            "Output: stack_4b.tif (o stack_7b.tif) e, opzionale, "
+            "stack_custom_Nb.tif."
         )
 
     # -------------------------------------------------------------------------
@@ -131,8 +151,22 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterBoolean(
                 self.MAKE_3BANDS,
-                self.tr("Genera anche variante 3 bande R, DEM, B"),
+                self.tr("Genera anche un raster con bande selezionate"),
                 defaultValue=True,
+            )
+        )
+        # Menu a selezione multipla: spunta le bande dello stack da includere
+        # nel raster custom. L'ordine di output segue l'ordine di questa lista
+        # (1=R,2=G,3=B,4=DEM,5=NX,6=NY,7=NZ), NON l'ordine in cui le spunti.
+        # Le bande 5/6/7 sono valide solo se la normal map e' inclusa
+        # (validato a runtime). Nessuna banda preselezionata di default.
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.CUSTOM_BANDS,
+                self.tr("Bande da includere nel raster custom (1-7)"),
+                options=self.SRC_BAND_LABELS,
+                allowMultiple=True,
+                defaultValue=[],  # nessuna banda preselezionata
             )
         )
         self.addParameter(
@@ -149,7 +183,8 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
         use_normal = self.parameterAsBool(parameters, self.USE_NORMAL, context)
         normal_lyr = self.parameterAsRasterLayer(parameters, self.NORMAL, context)
         dem_resampling = self.parameterAsEnum(parameters, self.DEM_RESAMPLING, context)
-        make_3b = self.parameterAsBool(parameters, self.MAKE_3BANDS, context)
+        make_custom = self.parameterAsBool(parameters, self.MAKE_3BANDS, context)
+        custom_idx = self.parameterAsEnums(parameters, self.CUSTOM_BANDS, context)
         out_dir = self.parameterAsString(parameters, self.OUT_DIR, context)
 
         if ortho_lyr is None or not ortho_lyr.isValid():
@@ -282,25 +317,53 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
 
         results = {"OUTPUT_FULL": out_full, "DEM_ALIGNED": dem_aligned, "VRT": vrt}
 
-        # --- FASE 2b: variante 3 bande (R, DEM, B) --------------------------
-        if make_3b:
-            feedback.pushInfo("[2b] Rearrange bands -> R, DEM, B...")
-            out_3b = p("stack_R_DEM_B.tif")
+        # --- FASE 2b: raster custom (bande selezionate, da 1 a 7) -----------
+        if make_custom:
+            if not custom_idx:
+                raise QgsProcessingException(
+                    self.tr(
+                        "Nessuna banda selezionata per il raster custom. "
+                        "Seleziona almeno una banda o disattiva l'opzione."
+                    )
+                )
+
+            # QGIS ordina gli indici della multi-selezione in modo crescente:
+            # l'ordine di output segue la lista bande (1=R..7=NZ), non l'ordine
+            # di spunta. Indici enum (0-based) -> numero banda GDAL (1-based).
+            chosen_idx = sorted(custom_idx)
+            bands_sel = [i + 1 for i in chosen_idx]
+
+            # Validazione: le bande 5,6,7 (NX,NY,NZ) esistono solo con normal map
+            max_band = n_expected  # 4 senza normal, 7 con normal
+            for b, idx in zip(bands_sel, chosen_idx):
+                if b > max_band:
+                    raise QgsProcessingException(
+                        self.tr(
+                            f"Hai scelto la banda '{self.SRC_BAND_LABELS[idx]}' "
+                            f"ma lo stack ha solo {max_band} bande. "
+                            "Le bande NX/NY/NZ richiedono 'Includi normal map'."
+                        )
+                    )
+
+            n_custom = len(bands_sel)
+            labels = ", ".join(self.SRC_BAND_LABELS[i] for i in chosen_idx)
+            feedback.pushInfo(f"[2b] Rearrange bands -> {bands_sel}  ({labels})")
+            out_custom = p(f"stack_custom_{n_custom}b.tif")
             processing.run(
                 "gdal:rearrange_bands",
                 {
                     "INPUT": out_full,
-                    "BANDS": [1, 4, 3],   # R, DEM, B
+                    "BANDS": bands_sel,
                     "CREATION_OPTIONS": "COMPRESS=LZW|TILED=YES",
                     "DATA_TYPE": 6,       # Float32
-                    "OUTPUT": out_3b,
+                    "OUTPUT": out_custom,
                 },
                 context=context,
                 feedback=feedback,
                 is_child_algorithm=True,
             )
-            feedback.pushInfo(f"    -> {out_3b}")
-            results["OUTPUT_3B"] = out_3b
+            feedback.pushInfo(f"    -> {out_custom}")
+            results["OUTPUT_CUSTOM"] = out_custom
 
         bande = "1=R 2=G 3=B 4=DEM" + (" 5=NX 6=NY 7=NZ" if use_normal else "")
         feedback.pushInfo(f"Fatto. Bande stack completo: {bande}")
