@@ -30,6 +30,8 @@ from qgis.core import (
     QgsProcessingParameterFolderDestination,
     QgsProcessingParameterDefinition,
     QgsRasterLayer,
+    QgsRectangle,
+    QgsCoordinateReferenceSystem,
 )
 import processing
 
@@ -205,13 +207,76 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
 
         # --- griglia MASTER dall'ortofoto -----------------------------------
         master_crs = ortho_lyr.crs().authid()
+        if not master_crs:
+            raise QgsProcessingException(
+                self.tr("L'ortofoto non ha un CRS valido (authid vuoto).")
+            )
+
+        # --- CRS del DEM: gestione export Metashape "Local Coordinates" -----
+        # Metashape spesso esporta il DEM con un EngineeringCRS/Local CRS privo
+        # di datum geodetico (authid vuoto). DEM e ortofoto escono pero' dallo
+        # stesso allineamento e sono fisicamente sulla stessa griglia, quindi
+        # NON vanno riproiettati: si forza SOURCE_CRS = CRS dell'ortofoto cosi'
+        # GDAL esegue solo l'allineamento di griglia (resample + -tap) senza
+        # cercare una trasformazione di coordinate inesistente
+        # ("Cannot find coordinate operations ... to EPSG:xxxx").
+        dem_crs = dem_lyr_in.crs()
+        dem_authid = dem_crs.authid()
+        # Un CRS "utilizzabile" per riproiettare deve essere valido, non locale
+        # e con un authid EPSG/utente riconosciuto.
+        dem_crs_usable = (
+            dem_crs.isValid()
+            and bool(dem_authid)
+            and not dem_authid.startswith("LOCAL")
+        )
+        if dem_crs_usable and dem_authid != master_crs:
+            # DEM realmente in un altro CRS: lascia che GDAL riproietti.
+            dem_source_crs = dem_authid
+            feedback.pushInfo(
+                f"DEM in CRS {dem_authid}: verra' riproiettato su {master_crs}."
+            )
+        else:
+            # DEM senza CRS valido o locale (tipico Metashape): assume la
+            # griglia master. Nessuna riproiezione, solo allineamento.
+            dem_source_crs = master_crs
+            feedback.pushInfo(
+                "DEM senza CRS proiettato valido (Local Coordinates?): "
+                f"assumo la griglia dell'ortofoto ({master_crs}). "
+                "Nessuna riproiezione, solo allineamento di griglia."
+            )
+
         px = ortho_lyr.rasterUnitsPerPixelX()
         py = ortho_lyr.rasterUnitsPerPixelY()
         res = min(px, py)
+        if not res or res <= 0:
+            raise QgsProcessingException(
+                self.tr("Risoluzione dell'ortofoto non valida (pixel size <= 0).")
+            )
+
         ext = ortho_lyr.extent()
-        te = f"{ext.xMinimum()} {ext.yMinimum()} {ext.xMaximum()} {ext.yMaximum()}"
-        feedback.pushInfo(f"MASTER  CRS={master_crs}  res={res}")
-        feedback.pushInfo(f"MASTER  extent=[{te}]")
+        if ext.isEmpty() or ext.width() <= 0 or ext.height() <= 0:
+            raise QgsProcessingException(
+                self.tr("Estensione dell'ortofoto non valida o vuota.")
+            )
+
+        # TARGET_EXTENT va passato come oggetto QgsRectangle, NON come stringa.
+        # L'API Processing valida questo parametro come extent: una stringa
+        # (in qualunque formato) viene rifiutata con
+        # "Valore del parametro non corretto per TARGET_EXTENT".
+        # NB: lo string-form di Processing per gli extent e' "xMin,xMax,yMin,yMax",
+        # non "xmin ymin xmax ymax" -> altra causa del rifiuto.
+        te_rect = QgsRectangle(
+            ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+        )
+        master_crs_obj = QgsCoordinateReferenceSystem(master_crs)
+        dem_source_crs_obj = QgsCoordinateReferenceSystem(dem_source_crs)
+
+        feedback.pushInfo(f"MASTER  CRS={master_crs}  res={res:.12f}")
+        feedback.pushInfo(
+            "MASTER  extent=[{:.10f} {:.10f} {:.10f} {:.10f}]".format(
+                ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()
+            )
+        )
 
         # --- FASE 0: warp DEM sulla griglia master --------------------------
         feedback.pushInfo("[0] Warp DEM sulla griglia dell'ortofoto...")
@@ -220,13 +285,13 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
             "gdal:warpreproject",
             {
                 "INPUT": dem_path,
-                "SOURCE_CRS": None,
-                "TARGET_CRS": master_crs,
+                "SOURCE_CRS": dem_source_crs_obj,   # forzato = master se DEM locale
+                "TARGET_CRS": master_crs_obj,
                 "RESAMPLING": dem_resampling,      # 1 = Bilinear (default)
                 "NODATA": None,
-                "TARGET_RESOLUTION": res,
-                "TARGET_EXTENT": te,
-                "TARGET_EXTENT_CRS": master_crs,
+                "TARGET_RESOLUTION": res,          # float nativo (non stringa)
+                "TARGET_EXTENT": te_rect,          # QgsRectangle, non stringa
+                "TARGET_EXTENT_CRS": master_crs_obj,
                 "DATA_TYPE": 6,                    # Float32
                 "MULTITHREADING": True,
                 "EXTRA": "-tap -co COMPRESS=LZW -co TILED=YES",
