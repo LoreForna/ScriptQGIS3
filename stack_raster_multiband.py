@@ -124,6 +124,7 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
             QgsProcessingParameterRasterLayer(
                 self.DEM,
                 self.tr("DEM monobanda (quote)"),
+                optional=True,
             )
         )
         self.addParameter(
