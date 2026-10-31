@@ -7,7 +7,7 @@
 #
 # INSTALLAZIONE
 #   Processing Toolbox -> icona Python -> "Aggiungi script agli strumenti..."
-#   Comparira' sotto "Scripts > Archeologia / Raster".
+#   Comparira' sotto "Scripts > Raster".
 #
 # LOGICA
 #   - Griglia master = ortofoto. Ogni altro input viene confrontato con la
@@ -320,10 +320,10 @@ class StackRasterMultiband(QgsProcessingAlgorithm):
         return self.tr("Stack raster multiband (paramento)")
 
     def group(self):
-        return self.tr("Archeologia / Raster")
+        return self.tr("Raster")
 
     def groupId(self):
-        return "archeologia_raster"
+        return "raster"
 
     def shortHelpString(self):
         return self.tr(
