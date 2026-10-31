@@ -10,40 +10,48 @@ esatti del raster sorgente.
 MODALITA' OUTPUT
 ----------------
 1) Float32 metrico (-1/+1), consigliato per confronto con Metashape:
-   Banda 1 = n.u, componente della normale lungo l'asse U/X del raster
-   Banda 2 = n.v, componente della normale lungo l'asse V/Y georeferenziato del raster
+   Banda 1 = n.u, componente della normale lungo +X georeferenziato
+   Banda 2 = n.v, componente della normale lungo +Y georeferenziato
    Banda 3 = n.w, componente frontale/normale al piano heightmap
    Valori reali: -1.0 ... +1.0
    NoData: NaN
 
-2) RGB Byte visuale (0/255):
-   Banda 1 / R = n.u codificato da [-1,+1] a [0,255]
-   Banda 2 / G = n.v codificato da [-1,+1] a [0,255]
-   Banda 3 / B = n.w codificato da [-1,+1] a [0,255]
-   Codifica: RGB = round((n + 1) * 127.5)
-   NoData/background: 0,0,0
+2) RGB Byte visuale (1/255):
+   Banda 1 / R = n.u, Banda 2 / G = n.v, Banda 3 / B = n.w
+   Codifica: byte = round((n + 1) * 127) + 1   ->  -1 = 1, 0 = 128, +1 = 255
+   Lo 0 e' riservato al NoData, quindi nessun pixel valido viene mascherato.
+   Decodifica: n = (byte - 1) / 127 - 1
+   Opzione DirectX: inverte il canale G (convenzione OpenGL = G verso +Y).
 
 3) Entrambi:
    Il percorso scelto dall'utente viene usato per il GeoTIFF float32 metrico.
-   Accanto a questo viene creato automaticamente un secondo file con suffisso _rgb.tif.
+   Accanto a questo viene creato un secondo file con suffisso _rgb.tif, dichiarato
+   come output OUTPUT_RGB e caricato automaticamente nel progetto.
 
 CALCOLO
 -------
-La normale e' calcolata dai gradienti della heightmap/DEM:
-  n = (-dz/dx, +dz/dy_immagine, 1)
-poi normalizzata.
+1) Derivate nello spazio pixel (dz/dcolonna, dz/driga):
+   - kernel di Horn 3x3 (default, come gdaldem), meno sensibile al rumore;
+   - oppure differenze centrali.
+   In prossimita' di bordi e NoData si scende automaticamente a differenze
+   centrali e poi a differenze in avanti/indietro, invece di perdere il pixel.
+2) Conversione in derivate georeferenziate tramite lo Jacobiano della
+   geotrasformazione: [dz/dX, dz/dY] = inv(J)^T [dz/dc, dz/dr],
+   J = [[gt1, gt2], [gt4, gt5]]. Gestisce correttamente raster north-up,
+   south-up, ruotati e con pixel anisotropi.
+3) n = (-dz/dX, -dz/dY, 1), poi normalizzata.
 
-SIGNIFICATO DELLE BANDE
------------------------
-Per analogia con lo script Metashape:
-  u = asse orizzontale del raster, cioe' direzione positiva delle colonne / X georeferenziata;
-  v = asse verticale/georeferenziato del raster, cioe' direzione positiva della Y del geotransform;
-  w = asse frontale, cioe' direzione positiva della heightmap.
+Il raster viene elaborato a blocchi di righe (con 1 px di bordo), quindi la
+memoria occupata non dipende dalle dimensioni del DEM. Con la correzione RANSAC
+attiva i passaggi sono due: campionamento delle normali, poi rotazione e scrittura.
 
-Nota sul segno di V/Y: nei GeoTIFF north-up il pixel size Y e' negativo, quindi le righe
-aumentano verso il basso ma la Y georeferenziata positiva va verso l'alto. La formula
-usa +dz/dy_immagine proprio per ottenere una banda 2 equivalente a n.v, non alla
-semplice direzione riga-verso-il-basso.
+REQUISITI
+---------
+- Il raster deve essere letto dal provider GDAL (file, GPKG, VRT...).
+- Il CRS non deve essere geografico: pixel in gradi e quote in metri danno
+  normali prive di significato. Riproiettare prima in un CRS metrico.
+  Raster senza CRS (es. heightmap di paramenti in sistema locale) sono ammessi:
+  si assume che unita' orizzontali e verticali coincidano (vedi Scala verticale).
 
 Uso:
   QGIS > Processing > Toolbox > Scripts > Create New Script
@@ -60,7 +68,9 @@ from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
     QgsProcessing,
     QgsProcessingAlgorithm,
+    QgsProcessingContext,
     QgsProcessingException,
+    QgsProcessingOutputRasterLayer,
     QgsProcessingParameterBoolean,
     QgsProcessingParameterEnum,
     QgsProcessingParameterNumber,
@@ -73,16 +83,28 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
     INPUT = 'INPUT'
     BAND = 'BAND'
     HEIGHT_SCALE = 'HEIGHT_SCALE'
+    GRADIENT_METHOD = 'GRADIENT_METHOD'
     ALIGN_DOMINANT = 'ALIGN_DOMINANT'
     RANSAC_ITERATIONS = 'RANSAC_ITERATIONS'
     RANSAC_ANGLE = 'RANSAC_ANGLE'
     OUTPUT_FORMAT = 'OUTPUT_FORMAT'
+    RGB_DIRECTX = 'RGB_DIRECTX'
     OUTPUT = 'OUTPUT'
+    OUTPUT_RGB = 'OUTPUT_RGB'
 
     # Output format enum indices
     FORMAT_FLOAT32 = 0
     FORMAT_RGB_BYTE = 1
     FORMAT_BOTH = 2
+
+    # Gradient method enum indices
+    GRADIENT_HORN = 0
+    GRADIENT_CENTRAL = 1
+
+    # Pixel per blocco di elaborazione (controlla il picco di memoria)
+    BLOCK_PIXELS = 1000000
+    # Numero massimo di normali campionate per il RANSAC
+    RANSAC_MAX_SAMPLE = 200000
 
     def tr(self, string):
         return QCoreApplication.translate('NormalMapFromDem', string)
@@ -107,18 +129,20 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
             'Crea una normal map a 3 bande da una heightmap/DEM mantenendo CRS, estensione, '
             'geotrasformazione, numero di righe/colonne e dimensione dei pixel del raster sorgente.\n\n'
             'Output consigliato per confronto con lo script Metashape:\n'
-            '  Float32 metrico: bande n.u, n.v, n.w con valori reali compresi tra -1 e +1.\n\n'
+            '  Float32 metrico: bande n.u (+X), n.v (+Y), n.w con valori reali tra -1 e +1.\n\n'
             'Output visuale classico:\n'
-            '  RGB Byte: bande R, G, B codificate in 0-255 tramite round((n + 1) * 127.5).\n\n'
-            'La normale e calcolata dai gradienti della heightmap/DEM:\n'
-            '  n = (-dz/dx, +dz/dy_immagine, 1)\n'
-            'poi normalizzata.\n\n'
+            '  RGB Byte: round((n + 1) * 127) + 1, range 1-255 (0 = NoData). '
+            'Convenzione OpenGL (G verso +Y); attivare l\'opzione DirectX per invertire G.\n\n'
+            'Gradienti: kernel di Horn 3x3 (default, come gdaldem) oppure differenze centrali, '
+            'con ripiego automatico su differenze centrali/unilaterali vicino a bordi e NoData. '
+            'Le derivate vengono convertite in X/Y georeferenziati tramite la geotrasformazione, '
+            'quindi i raster south-up o ruotati sono gestiti correttamente.\n\n'
+            'Il CRS non puo essere geografico (gradi): riproiettare prima in un CRS metrico.\n\n'
             'Il parametro Scala verticale moltiplica le quote prima del calcolo dei gradienti. '
-            'Usa 1.0 quando le unita verticali e orizzontali coincidono. Valori maggiori accentuano '
-            'le pendenze; valori minori le attenuano.\n\n'
-            'La correzione della normale dominante stima con RANSAC la direzione media della superficie '
-            'e ruota le normali affinche tale direzione coincida con (0,0,1). E utile per pareti '
-            'o superfici leggermente inclinate, perche rimuove il trend globale e conserva le variazioni locali.'
+            'Usa 1.0 quando le unita verticali e orizzontali coincidono.\n\n'
+            'La correzione della normale dominante (RANSAC) ruota le normali affinche la direzione '
+            'media della superficie coincida con (0,0,1). Utile per heightmap di pareti leggermente '
+            'inclinate; da lasciare disattivata per DEM di terreno, perche elimina l\'esposizione reale.'
         )
 
     def initAlgorithm(self, config=None):
@@ -150,10 +174,22 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
         )
 
         self.addParameter(
+            QgsProcessingParameterEnum(
+                self.GRADIENT_METHOD,
+                self.tr('Metodo di calcolo dei gradienti'),
+                options=[
+                    self.tr('Kernel di Horn 3x3 (come gdaldem)'),
+                    self.tr('Differenze centrali'),
+                ],
+                defaultValue=self.GRADIENT_HORN
+            )
+        )
+
+        self.addParameter(
             QgsProcessingParameterBoolean(
                 self.ALIGN_DOMINANT,
-                self.tr('Correggi/allinea la normale dominante con RANSAC'),
-                defaultValue=True
+                self.tr('Correggi/allinea la normale dominante con RANSAC (heightmap di pareti)'),
+                defaultValue=False
             )
         )
 
@@ -185,10 +221,18 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
                 self.tr('Tipo di output'),
                 options=[
                     self.tr('Float32 metrico: n.u, n.v, n.w reali -1/+1'),
-                    self.tr('RGB Byte visuale: R=n.u, G=n.v, B=n.w 0-255'),
+                    self.tr('RGB Byte visuale: R=n.u, G=n.v, B=n.w 1-255'),
                     self.tr('Entrambi: float32 + file _rgb.tif'),
                 ],
                 defaultValue=self.FORMAT_BOTH
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.RGB_DIRECTX,
+                self.tr('RGB in convenzione DirectX (inverti canale G)'),
+                defaultValue=False
             )
         )
 
@@ -199,25 +243,46 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
             )
         )
 
+        self.addOutput(
+            QgsProcessingOutputRasterLayer(
+                self.OUTPUT_RGB,
+                self.tr('Normal map RGB (modalita Entrambi)')
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Algoritmo principale
+    # ------------------------------------------------------------------
     def processAlgorithm(self, parameters, context, feedback):
         raster_layer = self.parameterAsRasterLayer(parameters, self.INPUT, context)
         if raster_layer is None:
             raise QgsProcessingException(self.tr('Raster sorgente non valido.'))
 
-        input_uri = raster_layer.dataProvider().dataSourceUri()
-        input_path = input_uri.split('|')[0]
         output_path = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
         band_index = self.parameterAsInt(parameters, self.BAND, context)
         height_scale = self.parameterAsDouble(parameters, self.HEIGHT_SCALE, context)
+        gradient_method = self.parameterAsEnum(parameters, self.GRADIENT_METHOD, context)
         align_dominant = self.parameterAsBool(parameters, self.ALIGN_DOMINANT, context)
         ransac_iterations = self.parameterAsInt(parameters, self.RANSAC_ITERATIONS, context)
         ransac_angle = self.parameterAsDouble(parameters, self.RANSAC_ANGLE, context)
         output_format = self.parameterAsEnum(parameters, self.OUTPUT_FORMAT, context)
+        rgb_directx = self.parameterAsBool(parameters, self.RGB_DIRECTX, context)
 
-        feedback.pushInfo(self.tr('Apertura raster sorgente...'))
-        src_ds = gdal.Open(input_path, gdal.GA_ReadOnly)
-        if src_ds is None:
-            raise QgsProcessingException(self.tr('Impossibile aprire il raster sorgente con GDAL.'))
+        # --- CRS: niente coordinate geografiche ---
+        crs = raster_layer.crs()
+        if crs.isValid() and crs.isGeographic():
+            raise QgsProcessingException(self.tr(
+                'Il raster e in un CRS geografico ({}): pixel in gradi e quote in metri danno '
+                'normali errate. Riproietta il DEM in un CRS metrico (es. UTM) e riprova.'
+            ).format(crs.authid()))
+        if not crs.isValid():
+            feedback.pushWarning(self.tr(
+                'Raster senza CRS: si assume che unita orizzontali e verticali coincidano '
+                '(regolare eventualmente la Scala verticale).'
+            ))
+
+        # --- Apertura con GDAL ---
+        src_ds = self._open_with_gdal(raster_layer)
 
         width = src_ds.RasterXSize
         height = src_ds.RasterYSize
@@ -234,170 +299,325 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
             raise QgsProcessingException(self.tr('Il raster sorgente non ha una geotrasformazione valida.'))
         projection = src_ds.GetProjection()
 
-        # Distanza reale tra centri-pixel lungo asse colonna e asse riga.
-        # Funziona anche con raster ruotati, pur mantenendo la stessa geotrasformazione in output.
-        x_spacing = math.hypot(float(gt[1]), float(gt[4]))
-        y_spacing = math.hypot(float(gt[2]), float(gt[5]))
-        if x_spacing <= 0 or y_spacing <= 0:
-            raise QgsProcessingException(self.tr('Dimensione pixel non valida.'))
+        # Jacobiano pixel -> coordinate: [dX, dY] = J [dc, dr]
+        jac = np.array([[gt[1], gt[2]], [gt[4], gt[5]]], dtype=np.float64)
+        if abs(np.linalg.det(jac)) < 1e-30:
+            raise QgsProcessingException(self.tr('Geotrasformazione degenere (pixel size nullo).'))
+        inv_jac_t = np.linalg.inv(jac).T
 
         feedback.pushInfo(self.tr('Dimensioni: {} colonne x {} righe').format(width, height))
-        feedback.pushInfo(self.tr('Pixel size reale: X={} ; Y={}').format(x_spacing, y_spacing))
-        feedback.pushInfo(self.tr('Convenzione bande: banda 1 = n.u / asse X raster; banda 2 = n.v / asse Y georeferenziato; banda 3 = n.w / frontale heightmap.'))
+        feedback.pushInfo(self.tr('Pixel size: X={} ; Y={}').format(
+            math.hypot(gt[1], gt[4]), math.hypot(gt[2], gt[5])))
+        feedback.pushInfo(self.tr('Metodo gradienti: {}').format(
+            'Horn 3x3' if gradient_method == self.GRADIENT_HORN else 'differenze centrali'))
+        feedback.pushInfo(self.tr(
+            'Convenzione bande: banda 1 = n.u / +X georeferenziato; banda 2 = n.v / +Y '
+            'georeferenziato; banda 3 = n.w / frontale heightmap.'))
 
         src_band = src_ds.GetRasterBand(band_index)
-        nodata = src_band.GetNoDataValue()
+        mask_band = src_band.GetMaskBand()
+        block_rows = max(16, self.BLOCK_PIXELS // width)
+        blocks = [(r0, min(r0 + block_rows, height)) for r0 in range(0, height, block_rows)]
 
-        feedback.setProgressText(self.tr('Lettura heightmap/DEM...'))
-        arr = src_band.ReadAsArray()
-        if arr is None:
-            raise QgsProcessingException(self.tr('Impossibile leggere la banda richiesta.'))
-        arr = arr.astype(np.float32)
+        def normals_for_block(r0, r1):
+            return self._compute_block_normals(
+                src_band, mask_band, width, height, r0, r1,
+                height_scale, gradient_method, inv_jac_t
+            )
 
-        valid = np.isfinite(arr)
-        if nodata is not None:
-            valid &= (arr != nodata)
-
-        valid_count = int(np.count_nonzero(valid))
-        if valid_count == 0:
-            raise QgsProcessingException(self.tr('Nessun pixel valido nella heightmap/DEM.'))
-
-        z = arr * np.float32(height_scale)
-        feedback.setProgress(20)
-
-        feedback.setProgressText(self.tr('Calcolo gradienti dz/dx e dz/dy...'))
-        dzdx, dzdy = self._safe_gradients(z, valid, x_spacing, y_spacing)
-        feedback.setProgress(45)
-
-        feedback.setProgressText(self.tr('Calcolo e normalizzazione delle normali...'))
-        nx = -dzdx
-        ny = dzdy
-        nz = np.ones_like(z, dtype=np.float32)
-
-        norm = np.sqrt(nx * nx + ny * ny + nz * nz)
-        normal_valid = valid & np.isfinite(norm) & (norm > 0)
-
-        nx_out = np.full_like(z, np.nan, dtype=np.float32)
-        ny_out = np.full_like(z, np.nan, dtype=np.float32)
-        nz_out = np.full_like(z, np.nan, dtype=np.float32)
-
-        nx_out[normal_valid] = nx[normal_valid] / norm[normal_valid]
-        ny_out[normal_valid] = ny[normal_valid] / norm[normal_valid]
-        nz_out[normal_valid] = nz[normal_valid] / norm[normal_valid]
-        feedback.setProgress(60)
-
+        # --- Passaggio 1 (opzionale): campionamento per RANSAC ---
+        rotation = None
+        progress_start = 0.0
         if align_dominant:
+            feedback.setProgressText(self.tr('Campionamento normali per RANSAC...'))
+            rng = np.random.default_rng(12345)
+            probability = min(1.0, self.RANSAC_MAX_SAMPLE / float(width * height))
+            samples = []
+            for i, (r0, r1) in enumerate(blocks):
+                if feedback.isCanceled():
+                    return {}
+                nx, ny, nz, valid = normals_for_block(r0, r1)
+                idx = np.flatnonzero(valid)
+                if idx.size:
+                    idx = idx[rng.random(idx.size) < probability]
+                    samples.append(np.column_stack((
+                        nx.ravel()[idx], ny.ravel()[idx], nz.ravel()[idx])))
+                feedback.setProgress(40.0 * (i + 1) / len(blocks))
+            progress_start = 40.0
+
+            if not samples or sum(s.shape[0] for s in samples) == 0:
+                raise QgsProcessingException(self.tr('Nessun pixel valido nella heightmap/DEM.'))
+
             feedback.setProgressText(self.tr('Stima RANSAC della normale dominante...'))
             dominant = self._dominant_normal_ransac(
-                nx_out,
-                ny_out,
-                nz_out,
-                normal_valid,
-                iterations=ransac_iterations,
-                angle_deg=ransac_angle,
-                feedback=feedback
-            )
-            feedback.pushInfo(
-                self.tr('Normale dominante stimata: [{:.6f}, {:.6f}, {:.6f}]').format(
-                    dominant[0], dominant[1], dominant[2]
-                )
-            )
+                np.vstack(samples), ransac_iterations, ransac_angle, rng, feedback)
+            feedback.pushInfo(self.tr('Normale dominante stimata: [{:.6f}, {:.6f}, {:.6f}]').format(
+                dominant[0], dominant[1], dominant[2]))
+            feedback.pushInfo(self.tr('Inclinazione rispetto a (0,0,1): {:.3f} gradi').format(
+                math.degrees(math.acos(max(-1.0, min(1.0, dominant[2]))))))
+            rotation = self._rotation_matrix_from_vectors(dominant, np.array([0.0, 0.0, 1.0]))
 
-            rotation = self._rotation_matrix_from_vectors(dominant, np.array([0.0, 0.0, 1.0], dtype=np.float64))
-            nx_out, ny_out, nz_out = self._apply_rotation(nx_out, ny_out, nz_out, normal_valid, rotation)
-            normal_valid = np.isfinite(nx_out) & np.isfinite(ny_out) & np.isfinite(nz_out)
-            feedback.setProgress(78)
+        # --- Preparazione output ---
+        output_path = self._ensure_tif_extension(output_path, feedback)
+        write_float = output_format in (self.FORMAT_FLOAT32, self.FORMAT_BOTH)
+        write_rgb = output_format in (self.FORMAT_RGB_BYTE, self.FORMAT_BOTH)
+
+        float_ds = None
+        rgb_ds = None
+        rgb_path = None
+        if write_float:
+            float_ds = self._create_float_dataset(output_path, width, height, gt, projection, rotation is not None)
+        if write_rgb:
+            rgb_path = output_path if output_format == self.FORMAT_RGB_BYTE else self._rgb_sibling_path(output_path)
+            rgb_ds = self._create_rgb_dataset(rgb_path, width, height, gt, projection, rgb_directx, rotation is not None)
+
+        # --- Passaggio 2: calcolo, rotazione e scrittura a blocchi ---
+        feedback.setProgressText(self.tr('Calcolo e scrittura normal map...'))
+        total_valid = 0
+        for i, (r0, r1) in enumerate(blocks):
+            if feedback.isCanceled():
+                break
+            nx, ny, nz, valid = normals_for_block(r0, r1)
+            if rotation is not None:
+                nx, ny, nz, valid = self._apply_rotation(nx, ny, nz, valid, rotation)
+            total_valid += int(np.count_nonzero(valid))
+
+            if float_ds is not None:
+                for b, arr in enumerate((nx, ny, nz)):
+                    float_ds.GetRasterBand(b + 1).WriteArray(arr.astype(np.float32), 0, r0)
+            if rgb_ds is not None:
+                rgb = self._encode_rgb_byte(nx, ny, nz, valid, rgb_directx)
+                for b in range(3):
+                    rgb_ds.GetRasterBand(b + 1).WriteArray(rgb[b], 0, r0)
+
+            feedback.setProgress(progress_start + (100.0 - progress_start) * (i + 1) / len(blocks))
+
+        for ds in (float_ds, rgb_ds):
+            if ds is not None:
+                ds.FlushCache()
+        float_ds = None
+        rgb_ds = None
+        src_ds = None
+
+        if total_valid == 0 and not feedback.isCanceled():
+            raise QgsProcessingException(self.tr('Nessun pixel valido nella heightmap/DEM.'))
 
         outputs = {}
-
-        if output_format in (self.FORMAT_FLOAT32, self.FORMAT_BOTH):
-            feedback.setProgressText(self.tr('Scrittura GeoTIFF float32 metrico n.u/n.v/n.w -1/+1...'))
-            metric_path = output_path
-            self._write_geotiff_float32(metric_path, nx_out, ny_out, nz_out, normal_valid, gt, projection)
-            outputs[self.OUTPUT] = metric_path
-            feedback.pushInfo(self.tr('Output metrico float32 salvato: {}').format(metric_path))
-
-        if output_format in (self.FORMAT_RGB_BYTE, self.FORMAT_BOTH):
-            feedback.setProgressText(self.tr('Codifica e scrittura GeoTIFF RGB Byte 0-255...'))
-            rgb_path = output_path if output_format == self.FORMAT_RGB_BYTE else self._rgb_sibling_path(output_path)
-            rgb = self._encode_rgb_byte(nx_out, ny_out, nz_out, normal_valid)
-            self._write_geotiff_rgb(rgb_path, rgb, gt, projection)
+        if write_float:
+            outputs[self.OUTPUT] = output_path
+            feedback.pushInfo(self.tr('Output metrico float32 salvato: {}').format(output_path))
+        if write_rgb:
             if output_format == self.FORMAT_RGB_BYTE:
                 outputs[self.OUTPUT] = rgb_path
             else:
-                outputs['OUTPUT_RGB'] = rgb_path
+                outputs[self.OUTPUT_RGB] = rgb_path
+                context.addLayerToLoadOnCompletion(
+                    rgb_path,
+                    QgsProcessingContext.LayerDetails(
+                        os.path.splitext(os.path.basename(rgb_path))[0],
+                        context.project(),
+                        self.OUTPUT_RGB
+                    )
+                )
             feedback.pushInfo(self.tr('Output RGB Byte salvato: {}').format(rgb_path))
 
-        feedback.setProgress(100)
-        src_ds = None
-        feedback.pushInfo(self.tr('Normal map completata.'))
+        feedback.pushInfo(self.tr('Normal map completata ({} pixel validi).').format(total_valid))
         return outputs
 
-    def _safe_gradients(self, z, valid, x_spacing, y_spacing):
-        """Calcola gradienti evitando che NoData/NaN contaminino i pixel validi."""
-        dzdx = np.full(z.shape, np.nan, dtype=np.float32)
-        dzdy = np.full(z.shape, np.nan, dtype=np.float32)
+    # ------------------------------------------------------------------
+    # Input / output
+    # ------------------------------------------------------------------
+    def _open_with_gdal(self, raster_layer):
+        if raster_layer.providerType() != 'gdal':
+            raise QgsProcessingException(self.tr(
+                'Il layer usa il provider "{}": sono supportati solo raster letti tramite GDAL '
+                '(GeoTIFF, GPKG, VRT...). Esporta prima il layer su file.'
+            ).format(raster_layer.providerType()))
 
-        # Gradiente X: differenze centrali; bordi con differenze in avanti/indietro.
-        if z.shape[1] > 2:
-            mask = valid[:, 1:-1] & valid[:, :-2] & valid[:, 2:]
-            values = (z[:, 2:] - z[:, :-2]) / np.float32(2.0 * x_spacing)
-            sub = dzdx[:, 1:-1]
-            sub[mask] = values[mask]
+        source = raster_layer.source()
+        candidates = [source]
+        if '|' in source:
+            candidates.append(source.split('|')[0])
+        for candidate in candidates:
+            ds = gdal.Open(candidate, gdal.GA_ReadOnly)
+            if ds is not None:
+                return ds
+        raise QgsProcessingException(
+            self.tr('Impossibile aprire il raster sorgente con GDAL: {}').format(source))
 
-        mask_left = valid[:, 0] & valid[:, 1]
-        left = dzdx[:, 0]
-        left[mask_left] = (z[:, 1][mask_left] - z[:, 0][mask_left]) / np.float32(x_spacing)
+    def _ensure_tif_extension(self, output_path, feedback):
+        root, ext = os.path.splitext(output_path)
+        if ext.lower() in ('.tif', '.tiff'):
+            return output_path
+        new_path = root + '.tif'
+        feedback.pushWarning(self.tr(
+            'Formato "{}" non supportato: l\'output viene scritto come GeoTIFF in {}').format(ext, new_path))
+        return new_path
 
-        mask_right = valid[:, -1] & valid[:, -2]
-        right = dzdx[:, -1]
-        right[mask_right] = (z[:, -1][mask_right] - z[:, -2][mask_right]) / np.float32(x_spacing)
+    def _rgb_sibling_path(self, output_path):
+        root, _ = os.path.splitext(output_path)
+        return root + '_rgb.tif'
 
-        # Se il raster ha solo 2 colonne, completa anche la seconda con la stessa logica.
-        if z.shape[1] == 2:
-            mask_col1 = valid[:, 1] & valid[:, 0]
-            col1 = dzdx[:, 1]
-            col1[mask_col1] = (z[:, 1][mask_col1] - z[:, 0][mask_col1]) / np.float32(x_spacing)
+    def _new_gtiff(self, path, width, height, data_type, options, gt, projection):
+        driver = gdal.GetDriverByName('GTiff')
+        if driver is None:
+            raise QgsProcessingException(self.tr('Driver GeoTIFF non disponibile.'))
+        if os.path.exists(path):
+            driver.Delete(path)
+        ds = driver.Create(path, width, height, 3, data_type, options=options)
+        if ds is None:
+            raise QgsProcessingException(self.tr('Impossibile creare il raster output: {}').format(path))
+        ds.SetGeoTransform(gt)
+        if projection:
+            ds.SetProjection(projection)
+        return ds
 
-        # Gradiente Y: differenze centrali; bordi con differenze in avanti/indietro.
-        if z.shape[0] > 2:
-            mask = valid[1:-1, :] & valid[:-2, :] & valid[2:, :]
-            values = (z[2:, :] - z[:-2, :]) / np.float32(2.0 * y_spacing)
-            sub = dzdy[1:-1, :]
-            sub[mask] = values[mask]
+    def _create_float_dataset(self, path, width, height, gt, projection, rotated):
+        ds = self._new_gtiff(path, width, height, gdal.GDT_Float32,
+                             ['COMPRESS=LZW', 'PREDICTOR=3', 'TILED=YES', 'BIGTIFF=IF_SAFER', 'INTERLEAVE=BAND'],
+                             gt, projection)
+        descriptions = [
+            'n.u - componente lungo +X georeferenziato, valore reale -1/+1',
+            'n.v - componente lungo +Y georeferenziato, valore reale -1/+1',
+            'n.w - componente frontale/normale al piano heightmap, valore reale -1/+1',
+        ]
+        for i in range(3):
+            band = ds.GetRasterBand(i + 1)
+            band.SetDescription(descriptions[i])
+            band.SetNoDataValue(float('nan'))
+        ds.SetMetadataItem('NORMAL_MAP_TYPE', 'metric_float32_direction_cosines')
+        ds.SetMetadataItem('NORMAL_COMPONENT_RANGE', '-1,+1')
+        ds.SetMetadataItem('BAND_1', 'n.u - asse +X georeferenziato')
+        ds.SetMetadataItem('BAND_2', 'n.v - asse +Y georeferenziato')
+        ds.SetMetadataItem('BAND_3', 'n.w - asse frontale/height')
+        ds.SetMetadataItem('DOMINANT_NORMAL_ALIGNED', 'YES' if rotated else 'NO')
+        ds.SetMetadataItem('METASHAPE_SEMANTIC_EQUIVALENCE', 'band1=n.u, band2=n.v, band3=n.w')
+        return ds
 
-        mask_top = valid[0, :] & valid[1, :]
-        top = dzdy[0, :]
-        top[mask_top] = (z[1, :][mask_top] - z[0, :][mask_top]) / np.float32(y_spacing)
+    def _create_rgb_dataset(self, path, width, height, gt, projection, directx, rotated):
+        ds = self._new_gtiff(path, width, height, gdal.GDT_Byte,
+                             ['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER', 'INTERLEAVE=PIXEL'],
+                             gt, projection)
+        color_interps = [gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand]
+        g_label = '-n.v (DirectX)' if directx else 'n.v (OpenGL)'
+        descriptions = [
+            'R = n.u codificato 1-255 (0 = NoData)',
+            'G = {} codificato 1-255 (0 = NoData)'.format(g_label),
+            'B = n.w codificato 1-255 (0 = NoData)',
+        ]
+        for i in range(3):
+            band = ds.GetRasterBand(i + 1)
+            band.SetColorInterpretation(color_interps[i])
+            band.SetDescription(descriptions[i])
+            band.SetNoDataValue(0)
+        ds.SetMetadataItem('NORMAL_MAP_TYPE', 'visual_rgb_byte')
+        ds.SetMetadataItem('NORMAL_COMPONENT_ENCODING', 'byte = round((component + 1) * 127) + 1 ; 0 = NoData')
+        ds.SetMetadataItem('NORMAL_COMPONENT_DECODING', 'component = (byte - 1) / 127 - 1')
+        ds.SetMetadataItem('GREEN_CONVENTION', 'DirectX (G = -Y)' if directx else 'OpenGL (G = +Y)')
+        ds.SetMetadataItem('DOMINANT_NORMAL_ALIGNED', 'YES' if rotated else 'NO')
+        ds.SetMetadataItem('METASHAPE_SEMANTIC_EQUIVALENCE', 'R/band1=n.u, G/band2=n.v, B/band3=n.w')
+        return ds
 
-        mask_bottom = valid[-1, :] & valid[-2, :]
-        bottom = dzdy[-1, :]
-        bottom[mask_bottom] = (z[-1, :][mask_bottom] - z[-2, :][mask_bottom]) / np.float32(y_spacing)
+    # ------------------------------------------------------------------
+    # Calcolo delle normali
+    # ------------------------------------------------------------------
+    def _read_padded_block(self, src_band, mask_band, width, height, r0, r1):
+        """Legge le righe r0..r1 con 1 px di bordo; restituisce quote e validita' (rows+2, width+2)."""
+        rows = r1 - r0
+        read_r0 = max(0, r0 - 1)
+        read_r1 = min(height, r1 + 1)
+        n_read = read_r1 - read_r0
 
-        # Se il raster ha solo 2 righe, completa anche la seconda con la stessa logica.
-        if z.shape[0] == 2:
-            mask_row1 = valid[1, :] & valid[0, :]
-            row1 = dzdy[1, :]
-            row1[mask_row1] = (z[1, :][mask_row1] - z[0, :][mask_row1]) / np.float32(y_spacing)
+        data = src_band.ReadAsArray(0, read_r0, width, n_read)
+        mask = mask_band.ReadAsArray(0, read_r0, width, n_read)
+        if data is None or mask is None:
+            raise QgsProcessingException(self.tr('Errore di lettura del raster (righe {}-{}).').format(r0, r1))
 
-        return dzdx, dzdy
+        z = np.zeros((rows + 2, width + 2), dtype=np.float64)
+        valid = np.zeros((rows + 2, width + 2), dtype=bool)
+        offset = read_r0 - (r0 - 1)
+        z[offset:offset + n_read, 1:-1] = data
+        valid[offset:offset + n_read, 1:-1] = (mask > 0)
+        valid &= np.isfinite(z)
+        z[~valid] = 0.0
+        return z, valid
 
-    def _dominant_normal_ransac(self, nx, ny, nz, valid_mask, iterations, angle_deg, feedback=None):
-        """Stima robusta della normale dominante usando RANSAC su un campione di normali."""
-        flat_valid = np.flatnonzero(valid_mask.ravel())
-        if flat_valid.size < 10:
-            return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    def _pixel_gradients(self, z, valid, method):
+        """
+        Derivate per pixel dz/dcolonna e dz/driga sul nucleo del blocco paddato.
+        Priorita': Horn 3x3 -> differenze centrali -> differenze in avanti/indietro.
+        """
+        rows = z.shape[0] - 2
+        cols = z.shape[1] - 2
 
-        max_sample = min(flat_valid.size, 200000)
-        rng = np.random.default_rng(12345)
-        sample_idx = rng.choice(flat_valid, size=max_sample, replace=False)
+        def s(dr, dc):
+            return z[1 + dr:1 + dr + rows, 1 + dc:1 + dc + cols]
 
-        normals = np.column_stack((
-            nx.ravel()[sample_idx],
-            ny.ravel()[sample_idx],
-            nz.ravel()[sample_idx],
-        )).astype(np.float64)
+        def v(dr, dc):
+            return valid[1 + dr:1 + dr + rows, 1 + dc:1 + dc + cols]
 
+        center = v(0, 0)
+        dzdc = np.full((rows, cols), np.nan, dtype=np.float64)
+        dzdr = np.full((rows, cols), np.nan, dtype=np.float64)
+
+        # Riempimento dal metodo meno preciso al piu' preciso: l'ultimo sovrascrive.
+        # Lungo le colonne (X pixel)
+        m = center & v(0, -1)
+        dzdc[m] = (s(0, 0) - s(0, -1))[m]
+        m = center & v(0, 1)
+        dzdc[m] = (s(0, 1) - s(0, 0))[m]
+        m = center & v(0, -1) & v(0, 1)
+        dzdc[m] = ((s(0, 1) - s(0, -1)) / 2.0)[m]
+
+        # Lungo le righe (Y pixel, verso il basso)
+        m = center & v(-1, 0)
+        dzdr[m] = (s(0, 0) - s(-1, 0))[m]
+        m = center & v(1, 0)
+        dzdr[m] = (s(1, 0) - s(0, 0))[m]
+        m = center & v(-1, 0) & v(1, 0)
+        dzdr[m] = ((s(1, 0) - s(-1, 0)) / 2.0)[m]
+
+        if method == self.GRADIENT_HORN:
+            m = center & v(-1, -1) & v(0, -1) & v(1, -1) & v(-1, 1) & v(0, 1) & v(1, 1)
+            horn_c = ((s(-1, 1) + 2.0 * s(0, 1) + s(1, 1)) - (s(-1, -1) + 2.0 * s(0, -1) + s(1, -1))) / 8.0
+            dzdc[m] = horn_c[m]
+
+            m = center & v(-1, -1) & v(-1, 0) & v(-1, 1) & v(1, -1) & v(1, 0) & v(1, 1)
+            horn_r = ((s(1, -1) + 2.0 * s(1, 0) + s(1, 1)) - (s(-1, -1) + 2.0 * s(-1, 0) + s(-1, 1))) / 8.0
+            dzdr[m] = horn_r[m]
+
+        return dzdc, dzdr
+
+    def _compute_block_normals(self, src_band, mask_band, width, height, r0, r1,
+                               height_scale, method, inv_jac_t):
+        z, valid = self._read_padded_block(src_band, mask_band, width, height, r0, r1)
+        z *= height_scale
+
+        dzdc, dzdr = self._pixel_gradients(z, valid, method)
+
+        # Derivate georeferenziate: [dz/dX, dz/dY] = inv(J)^T [dz/dc, dz/dr]
+        dzdx = inv_jac_t[0, 0] * dzdc + inv_jac_t[0, 1] * dzdr
+        dzdy = inv_jac_t[1, 0] * dzdc + inv_jac_t[1, 1] * dzdr
+
+        nx = -dzdx
+        ny = -dzdy
+        norm = np.sqrt(nx * nx + ny * ny + 1.0)
+        ok = np.isfinite(norm)
+
+        out_x = np.full(nx.shape, np.nan, dtype=np.float64)
+        out_y = np.full(nx.shape, np.nan, dtype=np.float64)
+        out_z = np.full(nx.shape, np.nan, dtype=np.float64)
+        out_x[ok] = nx[ok] / norm[ok]
+        out_y[ok] = ny[ok] / norm[ok]
+        out_z[ok] = 1.0 / norm[ok]
+        return out_x, out_y, out_z, ok
+
+    # ------------------------------------------------------------------
+    # RANSAC e rotazione
+    # ------------------------------------------------------------------
+    def _dominant_normal_ransac(self, normals, iterations, angle_deg, rng, feedback=None):
+        """Stima robusta della normale dominante con RANSAC su un campione (N,3) di normali."""
+        normals = np.asarray(normals, dtype=np.float64)
         norms = np.linalg.norm(normals, axis=1)
         keep = np.isfinite(norms) & (norms > 0)
         normals = normals[keep] / norms[keep, None]
@@ -410,18 +630,14 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
         best_inliers = None
 
         n = normals.shape[0]
-        for i in range(iterations):
+        for _ in range(iterations):
             if feedback is not None and feedback.isCanceled():
                 break
-
             candidate = normals[rng.integers(0, n)]
             if candidate[2] < 0:
                 candidate = -candidate
-
-            dots = normals @ candidate
-            inliers = dots >= cos_threshold
+            inliers = (normals @ candidate) >= cos_threshold
             count = int(np.count_nonzero(inliers))
-
             if count > best_count:
                 best_count = count
                 best_candidate = candidate
@@ -434,17 +650,14 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
 
         dominant_norm = np.linalg.norm(dominant)
         if not np.isfinite(dominant_norm) or dominant_norm == 0:
-            dominant = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        else:
-            dominant = dominant / dominant_norm
-
+            return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        dominant = dominant / dominant_norm
         if dominant[2] < 0:
             dominant = -dominant
-
-        return dominant.astype(np.float64)
+        return dominant
 
     def _rotation_matrix_from_vectors(self, source, target):
-        """Matrice di rotazione che porta source su target."""
+        """Matrice di rotazione (Rodrigues) che porta source su target."""
         a = np.array(source, dtype=np.float64)
         b = np.array(target, dtype=np.float64)
         a = a / np.linalg.norm(a)
@@ -457,7 +670,6 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
         if s < 1e-12:
             if c > 0:
                 return np.eye(3, dtype=np.float64)
-            # Caso opposto quasi impossibile qui, ma gestito per completezza.
             return np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=np.float64)
 
         k = np.array([
@@ -465,133 +677,32 @@ class NormalMapFromDem(QgsProcessingAlgorithm):
             [v[2], 0.0, -v[0]],
             [-v[1], v[0], 0.0],
         ], dtype=np.float64)
-
         return np.eye(3, dtype=np.float64) + k + (k @ k) * ((1.0 - c) / (s * s))
 
-    def _apply_rotation(self, nx, ny, nz, valid_mask, rotation):
-        """Applica la rotazione alle tre componenti e rinormalizza."""
-        nx2 = np.full_like(nx, np.nan, dtype=np.float32)
-        ny2 = np.full_like(ny, np.nan, dtype=np.float32)
-        nz2 = np.full_like(nz, np.nan, dtype=np.float32)
-
-        x = nx[valid_mask].astype(np.float64)
-        y = ny[valid_mask].astype(np.float64)
-        z = nz[valid_mask].astype(np.float64)
-
-        rx = rotation[0, 0] * x + rotation[0, 1] * y + rotation[0, 2] * z
-        ry = rotation[1, 0] * x + rotation[1, 1] * y + rotation[1, 2] * z
-        rz = rotation[2, 0] * x + rotation[2, 1] * y + rotation[2, 2] * z
-
+    def _apply_rotation(self, nx, ny, nz, valid, rotation):
+        """Applica la rotazione e rinormalizza; i pixel non validi restano NaN."""
+        rx = rotation[0, 0] * nx + rotation[0, 1] * ny + rotation[0, 2] * nz
+        ry = rotation[1, 0] * nx + rotation[1, 1] * ny + rotation[1, 2] * nz
+        rz = rotation[2, 0] * nx + rotation[2, 1] * ny + rotation[2, 2] * nz
         length = np.sqrt(rx * rx + ry * ry + rz * rz)
-        good = np.isfinite(length) & (length > 0)
+        good = valid & np.isfinite(length) & (length > 0)
 
-        valid_positions = np.flatnonzero(valid_mask.ravel())
-        good_positions = valid_positions[good]
+        out = []
+        for comp in (rx, ry, rz):
+            arr = np.full(comp.shape, np.nan, dtype=np.float64)
+            arr[good] = comp[good] / length[good]
+            out.append(arr)
+        return out[0], out[1], out[2], good
 
-        nx2_flat = nx2.ravel()
-        ny2_flat = ny2.ravel()
-        nz2_flat = nz2.ravel()
-
-        nx2_flat[good_positions] = (rx[good] / length[good]).astype(np.float32)
-        ny2_flat[good_positions] = (ry[good] / length[good]).astype(np.float32)
-        nz2_flat[good_positions] = (rz[good] / length[good]).astype(np.float32)
-
-        return nx2, ny2, nz2
-
-    def _encode_rgb_byte(self, nx, ny, nz, valid_mask):
-        """Codifica n.u,n.v,n.w float -1/+1 come RGB Byte 0-255."""
-        height, width = nx.shape
-        rgb = np.zeros((3, height, width), dtype=np.uint8)
-        rgb[0, valid_mask] = np.clip(np.rint((nx[valid_mask] + 1.0) * 127.5), 0, 255).astype(np.uint8)
-        rgb[1, valid_mask] = np.clip(np.rint((ny[valid_mask] + 1.0) * 127.5), 0, 255).astype(np.uint8)
-        rgb[2, valid_mask] = np.clip(np.rint((nz[valid_mask] + 1.0) * 127.5), 0, 255).astype(np.uint8)
+    # ------------------------------------------------------------------
+    # Codifica RGB
+    # ------------------------------------------------------------------
+    def _encode_rgb_byte(self, nx, ny, nz, valid, directx=False):
+        """Codifica -1/+1 in 1-255 (0 riservato al NoData)."""
+        rows, cols = nx.shape
+        rgb = np.zeros((3, rows, cols), dtype=np.uint8)
+        g = -ny if directx else ny
+        for i, comp in enumerate((nx, g, nz)):
+            vals = np.clip(comp[valid], -1.0, 1.0)
+            rgb[i, valid] = (np.rint((vals + 1.0) * 127.0) + 1.0).astype(np.uint8)
         return rgb
-
-    def _rgb_sibling_path(self, output_path):
-        root, ext = os.path.splitext(output_path)
-        if ext.lower() not in ('.tif', '.tiff'):
-            return output_path + '_rgb.tif'
-        return root + '_rgb.tif'
-
-    def _write_geotiff_float32(self, output_path, nx, ny, nz, valid_mask, geotransform, projection):
-        driver = gdal.GetDriverByName('GTiff')
-        if driver is None:
-            raise QgsProcessingException(self.tr('Driver GeoTIFF non disponibile.'))
-
-        if os.path.exists(output_path):
-            driver.Delete(output_path)
-
-        height, width = nx.shape
-        options = ['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER', 'INTERLEAVE=BAND']
-        out_ds = driver.Create(output_path, width, height, 3, gdal.GDT_Float32, options=options)
-        if out_ds is None:
-            raise QgsProcessingException(self.tr('Impossibile creare il raster output float32.'))
-
-        out_ds.SetGeoTransform(geotransform)
-        if projection:
-            out_ds.SetProjection(projection)
-
-        bands = [nx, ny, nz]
-        descriptions = [
-            "n.u - componente lungo asse U/X del raster, valore reale -1/+1",
-            "n.v - componente lungo asse V/Y georeferenziato del raster, valore reale -1/+1",
-            "n.w - componente frontale/normale al piano heightmap, valore reale -1/+1",
-        ]
-        nodata_value = float('nan')
-        for i, arr in enumerate(bands):
-            band = out_ds.GetRasterBand(i + 1)
-            band.WriteArray(arr.astype(np.float32, copy=False))
-            band.SetDescription(descriptions[i])
-            band.SetNoDataValue(nodata_value)
-            band.FlushCache()
-
-        out_ds.SetMetadataItem('NORMAL_MAP_TYPE', 'metric_float32_direction_cosines')
-        out_ds.SetMetadataItem('NORMAL_COMPONENT_RANGE', '-1,+1')
-        out_ds.SetMetadataItem('BAND_1', 'n.u - asse U/X del raster')
-        out_ds.SetMetadataItem('BAND_2', 'n.v - asse V/Y georeferenziato del raster')
-        out_ds.SetMetadataItem('BAND_3', 'n.w - asse frontale/height')
-        out_ds.SetMetadataItem('METASHAPE_SEMANTIC_EQUIVALENCE', 'band1=n.u, band2=n.v, band3=n.w')
-        out_ds.FlushCache()
-        out_ds = None
-
-    def _write_geotiff_rgb(self, output_path, rgb, geotransform, projection):
-        driver = gdal.GetDriverByName('GTiff')
-        if driver is None:
-            raise QgsProcessingException(self.tr('Driver GeoTIFF non disponibile.'))
-
-        if os.path.exists(output_path):
-            driver.Delete(output_path)
-
-        height = rgb.shape[1]
-        width = rgb.shape[2]
-        options = ['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER', 'INTERLEAVE=PIXEL']
-        out_ds = driver.Create(output_path, width, height, 3, gdal.GDT_Byte, options=options)
-        if out_ds is None:
-            raise QgsProcessingException(self.tr('Impossibile creare il raster output RGB.'))
-
-        out_ds.SetGeoTransform(geotransform)
-        if projection:
-            out_ds.SetProjection(projection)
-
-        color_interps = [gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand]
-        descriptions = [
-            "R = n.u codificato da -1/+1 a 0/255",
-            "G = n.v codificato da -1/+1 a 0/255",
-            "B = n.w codificato da -1/+1 a 0/255",
-        ]
-        for i in range(3):
-            band = out_ds.GetRasterBand(i + 1)
-            band.WriteArray(rgb[i])
-            band.SetColorInterpretation(color_interps[i])
-            band.SetDescription(descriptions[i])
-            band.SetNoDataValue(0)
-            band.FlushCache()
-
-        out_ds.SetMetadataItem('NORMAL_MAP_TYPE', 'visual_rgb_byte')
-        out_ds.SetMetadataItem('NORMAL_COMPONENT_ENCODING', 'byte = round((component + 1) * 127.5)')
-        out_ds.SetMetadataItem('BAND_1', 'R = n.u encoded')
-        out_ds.SetMetadataItem('BAND_2', 'G = n.v encoded')
-        out_ds.SetMetadataItem('BAND_3', 'B = n.w encoded')
-        out_ds.SetMetadataItem('METASHAPE_SEMANTIC_EQUIVALENCE', 'R/band1=n.u, G/band2=n.v, B/band3=n.w')
-        out_ds.FlushCache()
-        out_ds = None
